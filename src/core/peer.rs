@@ -30,7 +30,7 @@ impl Handshake {
     }
 
     pub fn decode(data: &[u8]) -> Result<(Self, &[u8]), String> {
-        if data.len() < 1 {
+        if data.is_empty() {
             return Err("handshake too short".into());
         }
 
@@ -109,6 +109,13 @@ impl Handshake {
             peer_id,
             reserved,
         })
+    }
+
+    pub fn verify_info_hash(&self, expected_info_hash: &[u8; 20]) -> Result<(), String> {
+        if &self.info_hash != expected_info_hash {
+            return Err("handshake info_hash does not match expected torrent".into());
+        }
+        Ok(())
     }
 }
 
