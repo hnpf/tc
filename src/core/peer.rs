@@ -180,6 +180,20 @@ impl PeerConnection {
         }
     }
 
+    pub fn send_request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), String> {
+        self.send_message(&Message::Request { index, begin, length })
+    }
+
+    pub fn receive_piece(&mut self) -> Result<(u32, u32, Vec<u8>), String> {
+        loop {
+            match self.receive_message()? {
+                Message::Piece { index, begin, block } => return Ok((index, begin, block)),
+                Message::KeepAlive => continue,
+                other => return Err(format!("expected piece, got {other:?}")),
+            }
+        }
+    }
+
     pub fn send_interested(&mut self) -> Result<(), String> {
         self.send_message(&Message::Interested)
     }
@@ -190,6 +204,93 @@ impl PeerConnection {
 
     pub fn send_keepalive(&mut self) -> Result<(), String> {
         self.send_message(&Message::KeepAlive)
+    }
+}
+
+pub struct PeerState {
+    pub connection: PeerConnection,
+    pub bitfield: Vec<u8>,
+    pub choked: bool,
+    pub remote_interested: bool,
+    pub local_interested: bool,
+}
+
+impl PeerState {
+    pub fn new(connection: PeerConnection) -> Self {
+        Self {
+            connection,
+            bitfield: Vec::new(),
+            choked: true,
+            remote_interested: false,
+            local_interested: false,
+        }
+    }
+
+    pub fn receive_and_update(&mut self) -> Result<Message, String> {
+        loop {
+            let msg = self.connection.receive_message()?;
+            match &msg {
+                Message::KeepAlive => continue,
+                Message::Choke => {
+                    self.choked = true;
+                    return Ok(msg);
+                }
+                Message::Unchoke => {
+                    self.choked = false;
+                    return Ok(msg);
+                }
+                Message::Interested => {
+                    self.remote_interested = true;
+                    return Ok(msg);
+                }
+                Message::NotInterested => {
+                    self.remote_interested = false;
+                    return Ok(msg);
+                }
+                Message::Bitfield(bits) => {
+                    self.bitfield = bits.clone();
+                    return Ok(msg);
+                }
+                Message::Have(index) => {
+                    self.set_piece(*index as usize, true);
+                    return Ok(msg);
+                }
+                _ => return Ok(msg),
+            }
+        }
+    }
+
+    pub fn set_interested(&mut self) -> Result<(), String> {
+        self.local_interested = true;
+        self.connection.send_interested()
+    }
+
+    pub fn set_not_interested(&mut self) -> Result<(), String> {
+        self.local_interested = false;
+        self.connection.send_message(&Message::NotInterested)
+    }
+
+    pub fn has_piece(&self, index: usize) -> bool {
+        let byte = index / 8;
+        let bit = 7 - (index % 8);
+        self.bitfield.get(byte).map_or(false, |byte| (byte >> bit) & 1 == 1)
+    }
+
+    pub fn piece_count(&self) -> usize {
+        self.bitfield.len() * 8
+    }
+
+    fn set_piece(&mut self, index: usize, value: bool) {
+        let byte = index / 8;
+        let bit = 7 - (index % 8);
+        if self.bitfield.len() <= byte {
+            self.bitfield.resize(byte + 1, 0);
+        }
+        if value {
+            self.bitfield[byte] |= 1 << bit;
+        } else {
+            self.bitfield[byte] &= !(1 << bit);
+        }
     }
 }
 
@@ -487,6 +588,40 @@ mod tests {
         let mut connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
         let received = connection.receive_bitfield().unwrap();
         assert_eq!(received, bitfield);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn peer_state_updates_bitfield_and_have_messages() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info_hash = [0x88u8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+            socket.write_all(&Message::Bitfield(vec![0b00000000]).encode()).unwrap();
+            socket.write_all(&Message::Have(3).encode()).unwrap();
+        });
+
+        let connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
+        let mut state = PeerState::new(connection);
+        let _ = state.receive_and_update().unwrap();
+        let msg = state.receive_and_update().unwrap();
+
+        assert_eq!(msg, Message::Have(3));
+        assert!(!state.has_piece(0));
+        assert!(state.has_piece(3));
+        assert_eq!(state.piece_count(), 8);
 
         server.join().unwrap();
     }
