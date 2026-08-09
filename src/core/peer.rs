@@ -170,6 +170,16 @@ impl PeerConnection {
         Message::read_from(&mut self.stream)
     }
 
+    pub fn receive_bitfield(&mut self) -> Result<Vec<u8>, String> {
+        loop {
+            match self.receive_message()? {
+                Message::Bitfield(bits) => return Ok(bits),
+                Message::KeepAlive => continue,
+                other => return Err(format!("expected bitfield, got {other:?}")),
+            }
+        }
+    }
+
     pub fn send_interested(&mut self) -> Result<(), String> {
         self.send_message(&Message::Interested)
     }
@@ -448,6 +458,35 @@ mod tests {
         let mut connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
         let message = connection.receive_message().unwrap();
         assert_eq!(message, Message::Unchoke);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn peer_connection_receive_bitfield_after_handshake() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info_hash = [0x77u8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+        let bitfield = vec![0b10101010, 0b11001100];
+        let bitfield_for_server = bitfield.clone();
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+            socket.write_all(&Message::Bitfield(bitfield_for_server).encode()).unwrap();
+        });
+
+        let mut connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
+        let received = connection.receive_bitfield().unwrap();
+        assert_eq!(received, bitfield);
 
         server.join().unwrap();
     }
