@@ -399,4 +399,60 @@ mod tests {
 
         server.join().unwrap();
     }
+
+    #[test]
+    fn peer_connection_receive_message_after_handshake() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info_hash = [0x33u8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+            socket.write_all(&Message::Unchoke.encode()).unwrap();
+        });
+
+        let mut connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
+        let message = connection.receive_message().unwrap();
+        assert_eq!(message, Message::Unchoke);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn peer_connection_send_keepalive_writes_zero_length_message() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info_hash = [0x44u8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+
+            let mut keepalive = [0u8; 4];
+            socket.read_exact(&mut keepalive).unwrap();
+            assert_eq!(keepalive, [0, 0, 0, 0]);
+        });
+
+        let mut connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
+        connection.send_keepalive().unwrap();
+
+        server.join().unwrap();
+    }
 }
