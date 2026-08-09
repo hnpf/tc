@@ -73,7 +73,7 @@ pub fn announce_addrs(
     left: i64,
 ) -> Result<Vec<SocketAddr>, String> {
     announce(announce_url, info_hash, peer_id, port, left)
-        .map(|peers| peers.into_iter().map(Peer::socket_addr).collect())
+        .map(|peers| peers.into_iter().map(|peer| peer.socket_addr()).collect())
 }
 
 fn parse_compact_peers(peers_raw: &[u8]) -> Result<Vec<Peer>, String> {

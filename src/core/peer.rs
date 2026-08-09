@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 
 pub const PROTOCOL_STR: &str = "BitTorrent protocol";
 pub const PROTOCOL_LEN: u8 = 19;
@@ -135,6 +135,17 @@ impl PeerConnection {
         remote_handshake.verify_info_hash(&info_hash)?;
 
         Ok(PeerConnection { stream, remote_handshake })
+    }
+
+    pub fn connect_addrs(addrs: &[SocketAddr], info_hash: [u8; 20], peer_id: [u8; 20]) -> Result<Self, String> {
+        let mut last_error: Option<String> = None;
+        for &addr in addrs {
+            match PeerConnection::connect(addr, info_hash, peer_id) {
+                Ok(connection) => return Ok(connection),
+                Err(err) => last_error = Some(err),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| "no peer addresses provided".into()))
     }
 
     pub fn send_message(&mut self, message: &Message) -> Result<(), String> {
@@ -452,6 +463,32 @@ mod tests {
 
         let mut connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
         connection.send_keepalive().unwrap();
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn peer_connection_connect_addrs_tries_multiple_addresses() {
+        use std::io::Read;
+        use std::net::{SocketAddr, TcpListener};
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info_hash = [0x55u8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+        });
+
+        let addrs = vec!["127.0.0.1:0".parse::<SocketAddr>().unwrap(), addr];
+        let connection = PeerConnection::connect_addrs(&addrs, info_hash, peer_id).unwrap();
+        assert_eq!(connection.remote_handshake.info_hash, info_hash);
 
         server.join().unwrap();
     }
