@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 
@@ -280,6 +281,29 @@ impl PeerState {
             return Err("unexpected piece response".into());
         }
         Ok(block)
+    }
+
+    pub fn download_piece(&mut self, index: u32, piece_length: u32) -> Result<Vec<u8>, String> {
+        let ranges = crate::core::piece::block_ranges(piece_length as usize);
+        let mut blocks: HashMap<u32, Vec<u8>> = HashMap::new();
+
+        for range in ranges {
+            let block = self.request_block(index, range.begin, range.length)?;
+            blocks.insert(range.begin, block);
+        }
+
+        crate::core::piece::assemble_piece(piece_length as usize, &blocks)
+    }
+
+    pub fn download_and_verify_piece(
+        &mut self,
+        index: u32,
+        piece_length: u32,
+        expected_hash: &[u8; 20],
+    ) -> Result<Vec<u8>, String> {
+        let piece = self.download_piece(index, piece_length)?;
+        crate::core::piece::verify_piece(expected_hash, &piece)?;
+        Ok(piece)
     }
 
     pub fn has_piece(&self, index: usize) -> bool {
@@ -676,6 +700,101 @@ mod tests {
         let connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
         let mut state = PeerState::new(connection);
         let result = state.request_block(piece_index, begin, block.len() as u32).unwrap();
+
+        assert_eq!(result, block);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn peer_state_download_piece_pipeline_assembles_blocks() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info_hash = [0xaau8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+        let piece_index = 0u32;
+        let piece_length = 20_000u32;
+        let part1 = vec![1u8; 16_384];
+        let part2 = vec![2u8; 3_616];
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+
+            let mut interested_buf = [0u8; 5];
+            socket.read_exact(&mut interested_buf).unwrap();
+            assert_eq!(interested_buf[4], 2);
+
+            let mut request1 = [0u8; 4 + 1 + 12];
+            socket.read_exact(&mut request1).unwrap();
+            assert_eq!(request1[4], 6);
+            let piece_msg1 = Message::Piece { index: piece_index, begin: 0, block: part1.clone() };
+            socket.write_all(&piece_msg1.encode()).unwrap();
+
+            let mut request2 = [0u8; 4 + 1 + 12];
+            socket.read_exact(&mut request2).unwrap();
+            assert_eq!(request2[4], 6);
+            let piece_msg2 = Message::Piece { index: piece_index, begin: 16_384, block: part2.clone() };
+            socket.write_all(&piece_msg2.encode()).unwrap();
+        });
+
+        let connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
+        let mut state = PeerState::new(connection);
+        let result = state.download_piece(piece_index, piece_length).unwrap();
+
+        assert_eq!(result.len(), 20_000);
+        assert!(result[..16_384].iter().all(|&b| b == 1));
+        assert!(result[16_384..].iter().all(|&b| b == 2));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn peer_state_download_and_verify_piece_roundtrip() {
+        use sha1::Digest;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info_hash = [0xbbu8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+        let piece_index = 0u32;
+        let piece_length = 4u32;
+        let block = vec![0x10, 0x20, 0x30, 0x40];
+
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(&block);
+        let expected_hash: [u8; 20] = hasher.finalize().into();
+        let block_clone = block.clone();
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+
+            let mut interested_buf = [0u8; 5];
+            socket.read_exact(&mut interested_buf).unwrap();
+            assert_eq!(interested_buf[4], 2);
+
+            let mut request_buf = [0u8; 4 + 1 + 12];
+            socket.read_exact(&mut request_buf).unwrap();
+            assert_eq!(request_buf[4], 6);
+            let piece_msg = Message::Piece { index: piece_index, begin: 0, block: block_clone };
+            socket.write_all(&piece_msg.encode()).unwrap();
+        });
+
+        let connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
+        let mut state = PeerState::new(connection);
+        let result = state.download_and_verify_piece(piece_index, piece_length, &expected_hash).unwrap();
 
         assert_eq!(result, block);
         server.join().unwrap();
