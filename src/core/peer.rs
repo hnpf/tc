@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 
 pub const PROTOCOL_STR: &str = "BitTorrent protocol";
 pub const PROTOCOL_LEN: u8 = 19;
@@ -116,6 +117,24 @@ impl Handshake {
             return Err("handshake info_hash does not match expected torrent".into());
         }
         Ok(())
+    }
+}
+
+pub struct PeerConnection {
+    pub stream: TcpStream,
+    pub remote_handshake: Handshake,
+}
+
+impl PeerConnection {
+    pub fn connect<A: ToSocketAddrs>(addr: A, info_hash: [u8; 20], peer_id: [u8; 20]) -> Result<Self, String> {
+        let mut stream = TcpStream::connect(addr).map_err(|e| e.to_string())?;
+        let outgoing = Handshake::new(info_hash, peer_id);
+        outgoing.write_to(&mut stream)?;
+
+        let remote_handshake = Handshake::read_from(&mut stream)?;
+        remote_handshake.verify_info_hash(&info_hash)?;
+
+        Ok(PeerConnection { stream, remote_handshake })
     }
 }
 
@@ -333,5 +352,31 @@ mod tests {
             rest = remaining;
         }
         assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn peer_connection_performs_handshake_and_verifies_info_hash() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info_hash = [0x22u8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+        });
+
+        let connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
+        assert_eq!(connection.remote_handshake.info_hash, info_hash);
+        assert_eq!(connection.remote_handshake.peer_id, peer_id);
+
+        server.join().unwrap();
     }
 }
