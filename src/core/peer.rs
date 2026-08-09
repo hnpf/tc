@@ -136,6 +136,22 @@ impl PeerConnection {
 
         Ok(PeerConnection { stream, remote_handshake })
     }
+
+    pub fn send_message(&mut self, message: &Message) -> Result<(), String> {
+        message.write_to(&mut self.stream)
+    }
+
+    pub fn receive_message(&mut self) -> Result<Message, String> {
+        Message::read_from(&mut self.stream)
+    }
+
+    pub fn send_interested(&mut self) -> Result<(), String> {
+        self.send_message(&Message::Interested)
+    }
+
+    pub fn send_unchoke(&mut self) -> Result<(), String> {
+        self.send_message(&Message::Unchoke)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
