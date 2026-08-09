@@ -152,6 +152,10 @@ impl PeerConnection {
     pub fn send_unchoke(&mut self) -> Result<(), String> {
         self.send_message(&Message::Unchoke)
     }
+
+    pub fn send_keepalive(&mut self) -> Result<(), String> {
+        self.send_message(&Message::KeepAlive)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
