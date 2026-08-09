@@ -1,10 +1,17 @@
 use crate::core::bencode::{decode, BencodeValue};
 use std::io::Read;
+use std::net::SocketAddr;
 
 #[derive(Debug)]
 pub struct Peer {
     pub ip: std::net::IpAddr,
     pub port: u16,
+}
+
+impl Peer {
+    pub fn socket_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.ip, self.port)
+    }
 }
 
 pub fn announce(
@@ -58,6 +65,17 @@ pub fn announce(
     Ok(peers)
 }
 
+pub fn announce_addrs(
+    announce_url: &str,
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+    port: u16,
+    left: i64,
+) -> Result<Vec<SocketAddr>, String> {
+    announce(announce_url, info_hash, peer_id, port, left)
+        .map(|peers| peers.into_iter().map(Peer::socket_addr).collect())
+}
+
 fn parse_compact_peers(peers_raw: &[u8]) -> Result<Vec<Peer>, String> {
     if peers_raw.len() % 6 != 0 {
         return Err("malformed compact peers".into());
@@ -96,12 +114,6 @@ fn parse_dict_peers(list: &[BencodeValue]) -> Vec<Peer> {
     peers
 }
 
-// raw bytes need percent encoding, not standard url encoding, every byte gets %XX
-// treating info_hash as a utf8 string here would corrupt it since its raw sha1 bytes
-fn url_encode_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("%{:02x}", b)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,4 +130,20 @@ mod tests {
         println!("got {} peers", peers.len());
         assert!(!peers.is_empty(), "tracker returned zero peers");
     }
+
+    #[test]
+    fn announce_addrs_returns_socket_addrs() {
+        let peer = Peer {
+            ip: "127.0.0.1".parse().unwrap(),
+            port: 6881,
+        };
+
+        assert_eq!(peer.socket_addr().to_string(), "127.0.0.1:6881");
+    }
+}
+
+// raw bytes need percent encoding, not standard url encoding, every byte gets %XX
+// treating info_hash as a utf8 string here would corrupt it since its raw sha1 bytes
+fn url_encode_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("%{:02x}", b)).collect()
 }
