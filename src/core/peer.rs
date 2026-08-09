@@ -148,6 +148,20 @@ impl PeerConnection {
         Err(last_error.unwrap_or_else(|| "no peer addresses provided".into()))
     }
 
+    pub fn connect_via_tracker(
+        announce_url: &str,
+        info_hash: [u8; 20],
+        peer_id: [u8; 20],
+        port: u16,
+        left: i64,
+    ) -> Result<Self, String> {
+        let addrs = crate::core::tracker::announce_addrs(announce_url, &info_hash, &peer_id, port, left)?;
+        if addrs.is_empty() {
+            return Err("tracker returned no peer addresses".into());
+        }
+        PeerConnection::connect_addrs(&addrs, info_hash, peer_id)
+    }
+
     pub fn send_message(&mut self, message: &Message) -> Result<(), String> {
         message.write_to(&mut self.stream)
     }
@@ -491,5 +505,59 @@ mod tests {
         assert_eq!(connection.remote_handshake.info_hash, info_hash);
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn peer_connection_connect_via_tracker_uses_tracker_peer_addresses() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let tracker_addr = listener.local_addr().unwrap();
+        let peer_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let peer_addr = peer_listener.local_addr().unwrap();
+
+        let info_hash = [0x66u8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+        let announce_url = format!("http://127.0.0.1:{}/announce", tracker_addr.port());
+
+        let tracker_server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&mut socket);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 0 {
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                line.clear();
+            }
+
+            let peers_bytes = [127, 0, 0, 1, (peer_addr.port() >> 8) as u8, (peer_addr.port() & 0xff) as u8];
+            let mut body = Vec::new();
+            body.extend_from_slice(b"d8:intervali1800e5:peers6:");
+            body.extend_from_slice(&peers_bytes);
+            body.extend_from_slice(b"e");
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).unwrap();
+            socket.write_all(&body).unwrap();
+        });
+
+        let peer_server = std::thread::spawn(move || {
+            let (mut socket, _) = peer_listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+        });
+
+        let connection = PeerConnection::connect_via_tracker(&announce_url, info_hash, peer_id, 6881, 0).unwrap();
+        assert_eq!(connection.remote_handshake.info_hash, info_hash);
+
+        tracker_server.join().unwrap();
+        peer_server.join().unwrap();
     }
 }
