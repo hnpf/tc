@@ -270,6 +270,18 @@ impl PeerState {
         self.connection.send_message(&Message::NotInterested)
     }
 
+    pub fn request_block(&mut self, index: u32, begin: u32, length: u32) -> Result<Vec<u8>, String> {
+        if !self.local_interested {
+            self.set_interested()?;
+        }
+        self.connection.send_request(index, begin, length)?;
+        let (resp_index, resp_begin, block) = self.connection.receive_piece()?;
+        if resp_index != index || resp_begin != begin {
+            return Err("unexpected piece response".into());
+        }
+        Ok(block)
+    }
+
     pub fn has_piece(&self, index: usize) -> bool {
         let byte = index / 8;
         let bit = 7 - (index % 8);
@@ -623,6 +635,49 @@ mod tests {
         assert!(state.has_piece(3));
         assert_eq!(state.piece_count(), 8);
 
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn peer_state_request_block_roundtrip() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info_hash = [0x99u8; 20];
+        let peer_id = *b"-TC0001-123456789012";
+        let piece_index = 1u32;
+        let begin = 0u32;
+        let block = vec![0xde, 0xad, 0xbe, 0xef];
+        let block_clone = block.clone();
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 1 + PROTOCOL_LEN as usize + 8 + 20 + 20];
+            socket.read_exact(&mut buffer).unwrap();
+
+            let response = Handshake::new(info_hash, peer_id);
+            socket.write_all(&response.encode()).unwrap();
+
+            let mut interested_buf = [0u8; 5];
+            socket.read_exact(&mut interested_buf).unwrap();
+            assert_eq!(&interested_buf[0..4], &[0, 0, 0, 1]);
+            assert_eq!(interested_buf[4], 2);
+
+            let mut request_buf = [0u8; 4 + 1 + 12];
+            socket.read_exact(&mut request_buf).unwrap();
+            assert_eq!(request_buf[4], 6);
+
+            let piece_msg = Message::Piece { index: piece_index, begin, block: block_clone };
+            socket.write_all(&piece_msg.encode()).unwrap();
+        });
+
+        let connection = PeerConnection::connect(addr, info_hash, peer_id).unwrap();
+        let mut state = PeerState::new(connection);
+        let result = state.request_block(piece_index, begin, block.len() as u32).unwrap();
+
+        assert_eq!(result, block);
         server.join().unwrap();
     }
 
